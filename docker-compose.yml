@@ -1,0 +1,34 @@
+services:
+  app:
+    image: node:20.18.1
+    container_name: vinted_telegram_bot
+    working_dir: /app
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=production
+    command: sh -c "npm install && npm start"
+    depends_on:
+      - mongodb
+    networks:
+      - vinted-network
+    restart: unless-stopped
+
+  mongodb:
+    image: mongo:latest
+    container_name: mongodb_vinted_telegram
+    command: mongod --port 27018
+    ports:
+      - "127.0.0.1:27018:27018"
+    volumes:
+      - mongodb_data_container:/data/db
+    networks:
+      - vinted-network
+    restart: unless-stopped
+
+volumes:
+  mongodb_data_container:
+
+networks:
+  vinted-network:

@@ -1,0 +1,19 @@
+services:
+  mongo-express:
+    image: mongo-express:latest
+    container_name: mongo_express_vinted_telegram
+    depends_on:
+      - mongodb
+    ports:
+      - "127.0.0.1:8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_SERVER: mongodb
+      ME_CONFIG_MONGODB_PORT: 27018
+      ME_CONFIG_BASICAUTH_USERNAME: ${MONGO_EXPRESS_USERNAME}
+      ME_CONFIG_BASICAUTH_PASSWORD: ${MONGO_EXPRESS_PASSWORD}
+    networks:
+      - vinted-network
+
+networks:
+  vinted-network:
+    external: true

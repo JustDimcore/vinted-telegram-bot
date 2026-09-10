@@ -1,0 +1,27 @@
+{
+  "name": "vinted-telegram-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot that monitors Vinted catalog searches and notifies about new items. Port of vinted-discord-bot.",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "node --max-old-space-size=4096 main.js",
+    "dev": "nodemon --max-old-space-size=4096 main.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "chalk": "^5.3.0",
+    "dotenv": "^16.4.5",
+    "fuse.js": "^7.0.0",
+    "grammy": "^1.30.0",
+    "mongoose": "^8.7.0",
+    "socks-proxy-agent": "^8.0.4"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  },
+  "license": "ISC"
+}
