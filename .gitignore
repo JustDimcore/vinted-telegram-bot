@@ -8,3 +8,4 @@ app.log
 proxies.txt
 
 .DS_Store
+.env
