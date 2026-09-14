@@ -1,11 +1,10 @@
 import { URL } from 'url';
 import Logger from '../utils/logger.js';
-import Fuse from 'fuse.js'; // Import Fuse.js
 import ConfigurationManager from '../utils/config_manager.js';
 import t from '../t.js';
 
-// Translation of Vinted subscription URL parameters into catalog API parameters.
-// The key is the parameter name in the URL, the value its name in the API.
+// Filters that make a search specific enough to monitor. The key is the parameter name in
+// the URL, the value the name the catalog API used for it.
 const URL_TO_API_FILTER = {
     'catalog[]': 'catalog_ids',
     'brand_ids[]': 'brand_ids',
@@ -20,32 +19,12 @@ const URL_TO_API_FILTER = {
     'currency': 'currency',
 };
 
-function parseVintedSearchParams(url) {
-    try {
-        const searchParams = {};
-        const params = new URL(url).searchParams;
-        const paramsKeys = ['search_text', 'order', 'catalog[]', 'brand_ids[]', 'video_game_platform_ids[]', 'size_ids[]', 'price_from', 'price_to', 'currency', 'status_ids[]', 'material_ids[]', 'color_ids[]'];
-        for (const key of paramsKeys) {
-            const isMultiple = key.endsWith('[]');
-            if (isMultiple) {
-                searchParams[key.replace('[]', '')] = params.getAll(key) || null;
-            } else {
-                searchParams[key] = params.get(key) || null;
-            }
-        }
-        return searchParams;
-    } catch (error) {
-        Logger.error("Invalid URL provided: ", error.message);
-        return null;
-    }
-}
-
 /**
- * Translates a Vinted subscription URL into filters for the catalog API.
- * Filtering is done by the server, because the trimmed catalog response no longer
- * carries catalog_id, brand_id or the other fields used for local filtering before.
+ * Reads the supported filters of a subscription URL.
+ * They only serve to reject a URL without any filter: the catalog page itself is requested
+ * with the parameters of the saved URL, and Vinted applies them.
  * @param {string} url - Vinted catalog URL saved for a subscription.
- * @returns {Object|null} - Filters for fetchCatalogItems, or null for an invalid URL.
+ * @returns {Object|null} - Filters found in the URL, or null for an invalid URL.
  */
 export function buildApiFiltersFromUrl(url) {
     let params;
@@ -78,7 +57,7 @@ export function buildApiFiltersFromUrl(url) {
 
 /**
  * Checks whether the URL narrows the search at all.
- * A subscription without a single filter would watch all of Vinted, flooding both the chat and the API.
+ * A subscription without a single filter would watch all of Vinted, flooding both the chat and the site.
  * @param {Object|null} filters - Filters from buildApiFiltersFromUrl.
  * @returns {boolean} - True when at least one filter is present.
  */
@@ -87,64 +66,26 @@ export function hasAnyFilter(filters) {
 }
 
 /**
- * Checks if a Vinted item matches the given search parameters, using fuzzy search.
+ * Checks an item against the banned keywords of a subscription.
  *
- * Category, brand, size, condition and price are no longer checked locally - the server
- * handles them during the request. Today's Vinted sends the seller country neither in the
- * catalog nor on the item page, so the countries_codes parameter is kept for backward
- * compatibility of callers but no longer filters.
- *
- * @param {Object} item - The Vinted item to check.
- * @param {Object} searchParams - The search parameters to match against the item.
- * @param {Array} bannedKeywords - Keywords that must not appear in the item.
- * @return {boolean} Returns true if the item matches, false otherwise.
+ * The catalog page carries no description, so the title and the brand are all there is to
+ * check. There is deliberately no local re-check of the search text: Vinted already searched
+ * with it, and a second, stricter match could only hide items the website does show.
+ * @param {Object} item - The item.
+ * @param {Array<string>} bannedKeywords - Keywords that must not appear.
+ * @returns {boolean} - True when the item contains one of them.
  */
-function matchVintedItemToSearchParams(item, searchParams, bannedKeywords) {
-    const lowerCaseItem = {
-        title: (item.title || '').toLowerCase(),
-        description: (item.description || '').toLowerCase(),
-        brand: (item.brand || '').toLowerCase()
-    };
+export function containsBannedKeyword(item, bannedKeywords) {
+    const text = [item.title, item.brand]
+        .filter(value => value && value !== 'N/A')
+        .join(' ')
+        .toLowerCase();
 
-    // make sure the bannedKeywords is an array of lowercase strings
-    bannedKeywords = (bannedKeywords || []).map(keyword => keyword.toLowerCase());
-
-    // check for banned keywords in the title and description
-    if (bannedKeywords.some(keyword => lowerCaseItem.title.includes(keyword) || lowerCaseItem.description.includes(keyword))) {
-        return false;
-    }
-
-    // Fuzzy search options
-    const fuseOptions = {
-        includeScore: true,
-        threshold: 0.4,  // Adjust this value for fuzzy tolerance (lower is stricter, higher is more lenient)
-        keys: ['title', 'description', 'brand']
-    };
-
-    // sanitize the search text
-    if (searchParams.search_text && searchParams.search_text.length > 0 && searchParams.search_text !== " ") {
-        const searchText = searchParams.search_text.toLowerCase();
-        const fuse = new Fuse([lowerCaseItem], fuseOptions);
-        const result = fuse.search(searchText);
-
-        // If no result or score is too low, return false
-        if (!result.length || result[0].score > 0.4) { // You can adjust the score threshold based on your needs
-            return false;
-        }
-    }
-
-    // If all criteria are met, return true
-    return true;
+    return (bannedKeywords || [])
+        .map(keyword => keyword.trim().toLowerCase())
+        .filter(Boolean)
+        .some(keyword => text.includes(keyword));
 }
-
-export function filterItemsByUrl(items, url, bannedKeywords) {
-    const searchParams = parseVintedSearchParams(url);
-    if (!searchParams) return [];
-
-    return items.filter(item => matchVintedItemToSearchParams(item, searchParams, bannedKeywords));
-}
-
-export { parseVintedSearchParams };
 
 /**
  * Extracts the Vinted domain extension from a URL.

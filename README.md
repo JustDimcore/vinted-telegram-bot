@@ -13,7 +13,7 @@ kept from the original; everything that talked to Discord was rewritten for Tele
 ## What it does
 
 - Watch any number of Vinted catalog searches, each with its own name and its own timer.
-- New items arrive as a photo with price, size, brand, condition, seller rating and a link.
+- New items arrive as a photo with price, size, brand, condition and links to the item and the seller.
 - Every search can be paused, resumed, renamed and deleted from an inline keyboard.
 - Banned keywords per search, so a word you never want to see filters the results out.
 - Multi marketplace: a `vinted.pl` link is watched on `vinted.pl`, a `vinted.fr` link on `vinted.fr`,
@@ -114,9 +114,8 @@ Everything lives in `.env`; `.env.local` overrides it and is not committed.
 | `TELEGRAM_ALLOWED_USER_IDS` | when set, only these ids may use the bot at all |
 | `ITEM_PHOTOS` | `1` sends one photo with buttons, `2`–`10` send an album (Telegram allows no buttons under an album, so the links move into the caption) |
 | `VINTED_API_DOMAIN_EXTENSION` | default marketplace, used when a URL does not say otherwise |
-| `MONITOR_INTERVAL_SECONDS` | how often one search is checked |
-| `ALGORITHM_CONCURRENT_REQUESTS` | parallel item detail requests |
-| `ALGORITHM_FILTER_ZERO_STARS_PROFILES` | skip sellers without a rating |
+| `MONITOR_INTERVAL_SECONDS` | shortest pause between two checks of one search |
+| `MONITOR_INTERVAL_MAX_SECONDS` | longest pause; each pause is random in between (default: 1.5 × the shortest) |
 | `USER_MAX_SUBSCRIPTIONS_DEFAULT` | searches a new user may run |
 | `ALLOW_USER_TO_CREATE_SUBSCRIPTIONS` | `0` limits creating searches to admins |
 | `ENABLE_SUBSCRIPTION_INACTIVITY` | ask about searches that find nothing for days |
@@ -140,18 +139,24 @@ A proxy that fails a request is parked for a minute and then tried again.
 ```
 main.js
  ├── CookieService          one Vinted session cookie per marketplace, refreshed every minute
- ├── SubscriptionMonitor    one timer per search: poll the catalog, keep the last seen item id
- │     ├── fetchCatalogItems     server side filtering from the search URL
- │     ├── fetchItemDetail       description and seller rating from the item page
- │     └── url_service           banned keywords and fuzzy text match on top
+ ├── SubscriptionMonitor    one timer per search: read the catalog page, keep the last seen item id
+ │     ├── fetchCatalogItems     the catalog page of the saved search, filtered by Vinted itself
+ │     └── url_service           banned keywords on top
  ├── TelegramService        one send queue for the whole bot: rate limits, retries, blocked chats
  └── bot/client.js          commands, inline keyboards, dialogs
 ```
 
-- **One timer per search.** A failing search does not stop the others, and a 429 only slows down
-  the search that caused it, doubling its interval until it succeeds again.
-- **The last seen item id is stored in the database.** A restart neither resends what you already
-  saw nor silently drops what appeared while the bot was down.
+- **One timer per search.** A failing search does not stop the others. Each pause is a random
+  value between `MONITOR_INTERVAL_SECONDS` and `MONITOR_INTERVAL_MAX_SECONDS`; every failed check
+  doubles the pause of that search, up to 30 minutes, and the first successful check resets it.
+  A cookie that cannot be fetched backs off the same way.
+- **Only the catalog page is read.** No item page is downloaded, so a notification shows what
+  the catalog card shows — title, price, size, brand, condition, photo — without a description
+  or a seller rating. Banned keywords are matched against the title and the brand.
+- **Nothing piles up across restarts.** Right after the bot starts, the first check of every search
+  only records the current results, so items published while the bot was down are not sent. The
+  last seen item id is still stored in the database: a search that is paused and resumed while the
+  bot keeps running continues where it stopped.
 - **Everything outgoing goes through one queue.** Telegram allows about 30 messages per second and
   one per second per chat; the queue enforces both and obeys `retry_after` on a 429.
 - **A blocked chat stops itself.** When Telegram reports that the bot was blocked or kicked, the

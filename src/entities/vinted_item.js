@@ -20,11 +20,6 @@ function validateUrl(value) {
   }
 }
 
-function parseDate(value) {
-  const parsedDate = new Date(value);
-  return isNaN(parsedDate.getTime()) ? new Date(0) : parsedDate;
-}
-
 class VintedPhoto {
   constructor(photo) {
     this.id = validateId(photo.id);
@@ -33,7 +28,7 @@ class VintedPhoto {
     this.height = validateNumber(photo.height);
     this.url = validateUrl(photo.url);
     this.dominantColor = validateString(photo.dominant_color);
-    // The trimmed catalog response has no full_size_url, only url and thumbnails.
+    // The catalog carries no full_size_url, only url and thumbnails.
     this.fullSizeUrl = validateUrl(photo.full_size_url ?? photo.url);
   }
 }
@@ -42,9 +37,7 @@ class VintedUser {
   constructor(userData) {
     this.id = validateId(userData.id);
     this.login = validateString(userData.login);
-    this.feedback_reputation = validateNumber(userData.feedback_reputation);
-    this.feedback_count = validateNumber(userData.feedback_count);
-    // Today's Vinted sends the seller country neither in the catalog nor on the item page.
+    // Today's Vinted does not send the seller country in the catalog.
     this.countryCode = validateString(userData.country_code).toLowerCase();
 
     this.photo = userData.photo ? new VintedPhoto(userData.photo) : null;
@@ -53,6 +46,12 @@ class VintedUser {
   }
 }
 
+/**
+ * An item as the catalog page shows it.
+ *
+ * The bot reads nothing but the catalog page, which carries no description, no seller rating
+ * and no update time - so an item has none of them either.
+ */
 class VintedItem {
   constructor(itemData) {
     this.id = validateId(itemData.id);
@@ -70,24 +69,20 @@ class VintedItem {
     this.countryId = validateId(itemData.country_id);
     this.catalogId = validateId(itemData.catalog_id);
 
-    this.description = validateString(itemData.description);
     // Today's catalog returns size_title and brand_title instead of size and brand;
-    // the old fields stay as a fallback in case the API shape changes again.
+    // the old fields stay as a fallback in case the shape changes again.
     this.size = validateString(itemData.size ?? itemData.size_title);
     this.brand = validateString(itemData.brand ?? itemData.brand_title);
     this.composition = validateString(itemData.composition);
     this.status = validateString(itemData.status);
     this.label = validateString(itemData.label);
-    // The price now arrives as an object { amount, currency_code }, previously as two fields.
+    // The price arrives as an object { amount, currency_code }, previously as two fields.
     this.currency = validateString(itemData.currency ?? itemData.price?.currency_code);
     this.priceNumeric = validateNumber(parseFloat(itemData.price_numeric ?? itemData.price?.amount));
     // Price including the buyer protection fee, when Vinted sends it.
     this.totalPriceNumeric = validateNumber(parseFloat(itemData.total_item_price?.amount));
 
-    this.updatedAtTs = parseDate(itemData.updated_at_ts);
     this.colorId = validateId(itemData.color1_id);
-
-    this.unixUpdatedAt = Math.floor(this.updatedAtTs.getTime() / 1000);
 
     // The catalog returns a photos array, some items carry a single photo in the photo field.
     const photos = itemData.photos ?? (itemData.photo ? [itemData.photo] : []);
@@ -96,39 +91,6 @@ class VintedItem {
     this.user = itemData.user ? new VintedUser(itemData.user) : null;
 
     this.catalogBranchTitle = validateString(itemData.catalog_branch_title);
-  }
-
-  /**
-   * Fills in fields that the catalog response no longer carries.
-   * @param {Object} detail - Detail from fetchItemDetail.
-   * @returns {VintedItem} - The same instance, for chaining.
-   */
-  mergeDetail(detail) {
-    if (!detail) {
-      return this;
-    }
-
-    if (typeof detail.description === 'string') {
-      this.description = detail.description;
-    }
-    if (typeof detail.brandId === 'number') {
-      this.brandId = detail.brandId;
-    }
-    if (typeof detail.catalogId === 'number') {
-      this.catalogId = detail.catalogId;
-    }
-    if (this.user && typeof detail.feedbackReputation === 'number') {
-      this.user.feedback_reputation = detail.feedbackReputation;
-    }
-    if (this.user && typeof detail.feedbackCount === 'number') {
-      this.user.feedback_count = detail.feedbackCount;
-    }
-
-    return this;
-  }
-
-  getNumericStars() {
-    return this.user ? this.user.feedback_reputation : 0;
   }
 
   /**

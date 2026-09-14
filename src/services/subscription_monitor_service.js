@@ -1,19 +1,16 @@
 import Logger from "../utils/logger.js";
 import { fetchCatalogItems } from "../api/fetchCatalogItems.js";
-import { fetchItemDetail } from "../api/fetchItemDetail.js";
 import { VintedItem } from "../entities/vinted_item.js";
-import { buildApiFiltersFromUrl, hasAnyFilter, filterItemsByUrl, getDomainFromUrl } from "./url_service.js";
-import ConfigurationManager from "../utils/config_manager.js";
+import { buildApiFiltersFromUrl, hasAnyFilter, containsBannedKeyword, getDomainFromUrl } from "./url_service.js";
 import crud from "../crud.js";
 
-// How many items one catalog request pulls. With an interval of tens of seconds a
-// single subscription does not gain that many items, and a larger page would only
-// transfer data that deduplication throws away anyway.
-const ITEMS_PER_REQUEST = 20;
-// After a rate limit the interval is multiplied until a request succeeds again.
-const RATE_LIMIT_BACKOFF_FACTOR = 2;
-const MAX_BACKOFF_MULTIPLIER = 10;
-const HTTP_RATE_LIMIT = 429;
+// After a failed check the pause of that subscription doubles, and the first successful check
+// resets it. A marketplace that blocks or breaks is then asked less and less often instead of
+// at the normal pace; the ceiling keeps one bad hour from pausing a subscription for a day.
+const BACKOFF_FACTOR = 2;
+const MAX_BACKOFF_DELAY_MS = 30 * 60 * 1000;
+// Vinted refusing the requests - a rate limit or its bot protection - rather than a bot error.
+const REFUSED_STATUS_CODES = [403, 429];
 // New subscriptions are spread over the interval instead of all firing at once.
 const STAGGER_STEP_MS = 1500;
 
@@ -27,18 +24,29 @@ const STAGGER_STEP_MS = 1500;
 class SubscriptionMonitorService {
     static states = new Map();
     static config = null;
+    static refreshChain = Promise.resolve();
+    // False until the subscriptions have been loaded once since the start.
+    static initialized = false;
 
     /**
      * Starts monitoring.
      * @param {Object} params - Service configuration.
      * @param {Function} params.getSubscriptions - Async function returning monitored subscriptions.
      * @param {Function} params.getCookie - Async function returning the Vinted cookie of a domain.
-     * @param {number} params.intervalMs - Base interval between checks of one subscription.
+     * @param {number} params.intervalMinMs - Shortest pause between two checks of one subscription.
+     * @param {number} [params.intervalMaxMs] - Longest pause; every pause is picked at random in between.
      * @param {Function} params.onItem - Called as onItem(item, subscription) for every new item.
      * @returns {Promise<void>}
      */
-    static async start({ getSubscriptions, getCookie, intervalMs, onItem }) {
-        this.config = { getSubscriptions, getCookie, intervalMs, onItem };
+    static async start({ getSubscriptions, getCookie, intervalMinMs, intervalMaxMs, onItem }) {
+        this.config = {
+            getSubscriptions,
+            getCookie,
+            intervalMinMs,
+            intervalMaxMs: Math.max(intervalMaxMs ?? intervalMinMs, intervalMinMs),
+            onItem,
+        };
+        this.initialized = false;
         await this.refresh();
     }
 
@@ -50,14 +58,28 @@ class SubscriptionMonitorService {
             clearTimeout(state.timer);
         }
         this.states.clear();
+        this.initialized = false;
     }
 
     /**
      * Synchronizes timers with the current list of monitored subscriptions.
      * Called on start and whenever the list of subscriptions changes.
+     *
+     * Calls are queued: two overlapping runs could finish out of order, and the older
+     * database read would then bring back a subscription that was just deleted.
      * @returns {Promise<void>}
      */
-    static async refresh() {
+    static refresh() {
+        const run = this.refreshChain.then(() => this.synchronize());
+        this.refreshChain = run.catch(() => {});
+        return run;
+    }
+
+    /**
+     * One synchronization run, see refresh().
+     * @returns {Promise<void>}
+     */
+    static async synchronize() {
         if (!this.config) {
             return;
         }
@@ -81,9 +103,10 @@ class SubscriptionMonitorService {
             if (!existing) {
                 this.states.set(key, {
                     subscription,
-                    // The position survives a restart, so a restart neither resends known
-                    // items nor silently swallows the ones that appeared while it was down.
-                    lastSeenId: Number(subscription.lastSeenItemId) || 0,
+                    // Right after the bot starts every subscription begins from scratch: its first
+                    // check only records the current results, so nothing published while the bot
+                    // was down is sent. A subscription resumed later keeps its stored position.
+                    lastSeenId: this.initialized ? Number(subscription.lastSeenItemId) || 0 : 0,
                     backoffMultiplier: 1,
                     timer: null,
                 });
@@ -106,13 +129,41 @@ class SubscriptionMonitorService {
             }
         }
 
+        if (!this.initialized) {
+            Logger.info('Items published while the bot was down are skipped, the first check of each subscription only records its current results');
+        }
+        this.initialized = true;
+
         Logger.info(`Monitoring ${this.states.size} Vinted subscription(s)`);
+    }
+
+    /**
+     * Whether a running check still belongs to a monitored subscription.
+     * A deleted or paused subscription loses its state on refresh, and a resumed one gets a
+     * new state object - in both cases a check that was already running has to stop.
+     * @param {Object} state - State the check was started with.
+     * @returns {boolean} - True while the state is the live one.
+     */
+    static isCurrent(state) {
+        return this.states.get(state.subscription.subscriptionId) === state;
+    }
+
+    /**
+     * Pause before the next check: a random point between the shortest and the longest
+     * interval, so the checks do not fall into a fixed rhythm, multiplied after failures.
+     * @param {Object} state - Subscription state.
+     * @returns {number} - Delay in milliseconds.
+     */
+    static nextDelay(state) {
+        const { intervalMinMs, intervalMaxMs } = this.config;
+        const interval = intervalMinMs + Math.random() * (intervalMaxMs - intervalMinMs);
+        return Math.round(Math.min(interval * state.backoffMultiplier, MAX_BACKOFF_DELAY_MS));
     }
 
     /**
      * Schedules the next check of one subscription.
      * @param {string} key - Subscription identifier.
-     * @param {number} [delayMs] - Delay before the check; defaults to the interval.
+     * @param {number} [delayMs] - Delay before the check; defaults to nextDelay().
      */
     static scheduleNext(key, delayMs) {
         const state = this.states.get(key);
@@ -120,7 +171,7 @@ class SubscriptionMonitorService {
             return;
         }
 
-        const delay = delayMs ?? this.config.intervalMs * state.backoffMultiplier;
+        const delay = delayMs ?? this.nextDelay(state);
         state.timer = setTimeout(() => this.checkSubscription(key), delay);
     }
 
@@ -135,20 +186,41 @@ class SubscriptionMonitorService {
             return;
         }
 
+        let failure = null;
         try {
             await this.collectNewItems(state);
             state.backoffMultiplier = 1;
         } catch (error) {
-            if (error.code === HTTP_RATE_LIMIT) {
-                state.backoffMultiplier = Math.min(state.backoffMultiplier * RATE_LIMIT_BACKOFF_FACTOR, MAX_BACKOFF_MULTIPLIER);
-                Logger.warn(`Rate limited on subscription ${key}, next check in ${this.config.intervalMs * state.backoffMultiplier / 1000}s`);
-            } else {
-                Logger.error(`Error checking subscription ${key}: ${error.message}`);
+            failure = error;
+            // Past the ceiling the delay is capped anyway, so the multiplier stops growing there.
+            if (this.config.intervalMinMs * state.backoffMultiplier < MAX_BACKOFF_DELAY_MS) {
+                state.backoffMultiplier *= BACKOFF_FACTOR;
             }
         }
 
+        // A subscription deleted or paused during this check is not rescheduled, and a resumed
+        // one already runs on its own timer - scheduling it here as well would start a second
+        // loop and every item would arrive twice.
+        if (!this.isCurrent(state)) {
+            if (failure) {
+                Logger.error(`Error checking subscription ${key}: ${failure.message}`);
+            }
+            return;
+        }
+
         // Rescheduled even after an error, otherwise one failure would stop it for good.
-        this.scheduleNext(key);
+        const delay = this.nextDelay(state);
+
+        if (failure) {
+            const next = `next check in ${Math.round(delay / 1000)}s`;
+            if (REFUSED_STATUS_CODES.includes(failure.code)) {
+                Logger.warn(`Vinted refused subscription ${key} (${next}): ${failure.message}`);
+            } else {
+                Logger.error(`Error checking subscription ${key} (${next}): ${failure.message}`);
+            }
+        }
+
+        this.scheduleNext(key, delay);
     }
 
     /**
@@ -166,14 +238,15 @@ class SubscriptionMonitorService {
         }
 
         // Each subscription is queried on the marketplace of its own URL, with the cookie
-        // that belongs to it - the token of one marketplace is rejected by the others.
+        // that belongs to it.
         const domain = getDomainFromUrl(subscription.url);
         const cookie = await this.config.getCookie(domain);
 
+        // The catalog page is fetched with the parameters of the saved URL itself, so every
+        // filter the website supports keeps working without a translation table.
         const response = await fetchCatalogItems({
             cookie,
-            filters,
-            per_page: ITEMS_PER_REQUEST,
+            url: subscription.url,
             domain,
         });
 
@@ -183,6 +256,11 @@ class SubscriptionMonitorService {
             throw error;
         }
 
+        // The request takes a moment; the subscription may be gone by the time it returns.
+        if (!this.isCurrent(state)) {
+            return;
+        }
+
         const rawItems = response.items || [];
         if (!rawItems.length) {
             return;
@@ -190,8 +268,9 @@ class SubscriptionMonitorService {
 
         const highestId = Math.max(...rawItems.map(item => Number(item.id)));
 
-        // The first run only records the current state, otherwise a fresh subscription
-        // would fire a burst of items the user has already scrolled past on the website.
+        // The first check only records the current state: for a fresh subscription, and for
+        // every subscription right after the bot starts. Otherwise a burst of items the user has
+        // already scrolled past, or that piled up while the bot was down, would be sent.
         if (state.lastSeenId === 0) {
             state.lastSeenId = highestId;
             await crud.setSubscriptionLastSeenItemId(subscription.subscriptionId, highestId);
@@ -211,49 +290,45 @@ class SubscriptionMonitorService {
         }
 
         // A full page of new items means more items appeared between two checks than fit
-        // into a single request, and the oldest of them will never be seen.
+        // into a single page, and the oldest of them will never be seen.
         if (newItems.length === rawItems.length) {
             Logger.warn(`Subscription ${subscription.subscriptionId} returned a full page of new items, some may have been missed. Shorten the interval or narrow the search.`);
         }
 
-        await this.reportItems(newItems, subscription, cookie);
+        await this.reportItems(newItems, state);
     }
 
     /**
-     * Adds details to new items, applies local filters and hands them over.
-     * @param {Array<Object>} rawItems - Raw items from the catalog response.
-     * @param {Object} subscription - Subscription the items belong to.
-     * @param {string} cookie - Cookie of the marketplace the items came from.
+     * Hands the new items over, skipping the ones with a banned keyword.
+     *
+     * Everything comes from the catalog page; no item page is downloaded. Whatever else the
+     * search asks for has already been applied by Vinted when it rendered that page.
+     * @param {Array<Object>} rawItems - Items from the catalog page, oldest first.
+     * @param {Object} state - State of the subscription the items belong to.
      * @returns {Promise<void>}
      */
-    static async reportItems(rawItems, subscription, cookie) {
-        const concurrency = Math.max(1, Number(ConfigurationManager.getAlgorithmSetting.concurrent_requests) || 1);
-        const filterZeroStars = ConfigurationManager.getAlgorithmSetting.filter_zero_stars_profiles;
+    static async reportItems(rawItems, state) {
+        const { subscription } = state;
         let reported = 0;
+        let handled = 0;
 
-        for (let i = 0; i < rawItems.length; i += concurrency) {
-            const batch = rawItems.slice(i, i + concurrency);
-
-            const items = await Promise.all(batch.map(async raw => {
-                const item = new VintedItem(raw);
-                const detail = await fetchItemDetail({ cookie, url: item.url });
-                return item.mergeDetail(detail);
-            }));
-
-            for (const item of items) {
-                if (filterZeroStars && item.getNumericStars() === 0) {
-                    continue;
-                }
-
-                // Only what the server cannot do is left: banned keywords and fuzzy text match.
-                const [matched] = filterItemsByUrl([item], subscription.url, subscription.bannedKeywords || []);
-                if (!matched) {
-                    continue;
-                }
-
-                await this.config.onItem(item, subscription);
-                reported += 1;
+        for (const raw of rawItems) {
+            // Delivery takes about a second per message, so a large batch can outlive its
+            // subscription. Once it is deleted or paused, nothing more is sent.
+            if (!this.isCurrent(state)) {
+                Logger.info(`Subscription ${subscription.subscriptionId} was deleted or paused, dropped ${rawItems.length - handled} pending item(s)`);
+                break;
             }
+
+            handled += 1;
+            const item = new VintedItem(raw);
+
+            if (containsBannedKeyword(item, subscription.bannedKeywords)) {
+                continue;
+            }
+
+            await this.config.onItem(item, subscription);
+            reported += 1;
         }
 
         if (reported > 0) {

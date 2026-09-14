@@ -27,7 +27,7 @@ export async function execute(ctx) {
         `${escapeHtml(ctx.t('active-subscriptions'))}: <b>${active}</b>`,
         `${escapeHtml(ctx.t('items-found-total'))}: <b>${itemsFound}</b>`,
         '',
-        `${escapeHtml(ctx.t('check-interval'))}: <b>${algorithmSettings.monitor_interval_seconds}s</b>`,
+        `${escapeHtml(ctx.t('check-interval'))}: <b>${algorithmSettings.monitor_interval_seconds}–${Math.round(algorithmSettings.monitor_interval_max_seconds)}s</b>`,
         `${escapeHtml(ctx.t('default-marketplace'))}: <code>vinted.${escapeHtml(algorithmSettings.vinted_api_domain_extension)}</code>`,
     ];
 

@@ -67,11 +67,13 @@ class ConfigurationManager {
      */
     static getAlgorithmSetting = {
         vinted_api_domain_extension: process.env.VINTED_API_DOMAIN_EXTENSION || 'fr',
-        filter_zero_stars_profiles: process.env.ALGORITHM_FILTER_ZERO_STARS_PROFILES == 1,
-        concurrent_requests: Number(process.env.ALGORITHM_CONCURRENT_REQUESTS) || 15,
-        // How often a single subscription is checked. The default minute is a compromise between
-        // notification speed and the load the bot puts on Vinted and on the network.
+        // Shortest and longest pause between two checks of one subscription; every pause is picked
+        // at random in between. The default minute is a compromise between notification speed and
+        // the load the bot puts on Vinted.
         monitor_interval_seconds: Number(process.env.MONITOR_INTERVAL_SECONDS) || 60,
+        // Without an explicit upper bound the pause varies by half of the shortest one (30 -> 30..45).
+        monitor_interval_max_seconds: Number(process.env.MONITOR_INTERVAL_MAX_SECONDS)
+            || (Number(process.env.MONITOR_INTERVAL_SECONDS) || 60) * 1.5,
         blacklisted_countries_codes: parseIdList(process.env.BLACKLISTED_COUNTRIES_CODES),
     }
 

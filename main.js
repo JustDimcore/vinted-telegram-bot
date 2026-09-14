@@ -141,7 +141,8 @@ Logger.info('Starting subscription monitoring');
 await SubscriptionMonitorService.start({
     getSubscriptions: () => crud.getAllMonitoredSubscriptions(),
     getCookie: domain => CookieService.get(domain),
-    intervalMs: algorithmSettings.monitor_interval_seconds * 1000,
+    intervalMinMs: algorithmSettings.monitor_interval_seconds * 1000,
+    intervalMaxMs: algorithmSettings.monitor_interval_max_seconds * 1000,
     onItem: sendItem,
 });
 

@@ -2,55 +2,96 @@ import { fetchCookie } from '../api/fetchCookie.js';
 import Logger from '../utils/logger.js';
 import ConfigurationManager from '../utils/config_manager.js';
 
-// A Vinted token stays valid for a while, but refreshing it once a minute is cheap and
-// keeps a subscription from failing on an expired session.
-const REFRESH_INTERVAL_MS = 60000;
-const RETRY_DELAY_MS = 200;
+// A working cookie is refreshed once a minute, which keeps a subscription from running into
+// an expired session.
+const REFRESH_INTERVAL_MS = 60 * 1000;
+// After a failed attempt the wait doubles, starting at the refresh interval, up to this
+// ceiling. A marketplace that refuses is neither asked every minute nor in a burst of retries.
+const MAX_RETRY_DELAY_MS = 30 * 60 * 1000;
 
 const defaultDomain = ConfigurationManager.getAlgorithmSetting.vinted_api_domain_extension;
 
 /**
  * Holds one session cookie per Vinted marketplace.
  *
- * The Discord original knew a single domain and kept one cookie in a variable. Users of the
- * Telegram bot bring URLs from different marketplaces, and a cookie of vinted.fr is rejected
- * by the API of vinted.pl, so the cookies are kept per domain.
+ * Users bring URLs from different marketplaces, and a cookie of one marketplace is not
+ * accepted by another, so the cookies are kept per domain.
  */
 class CookieService {
     static cookies = new Map();
+    // domain -> { delayMs, retryAt } after a failed attempt
+    static failures = new Map();
     static pending = new Map();
     static refreshTimer = null;
+    // A property rather than a direct call, so tests can replace the network request.
+    static fetchCookie = fetchCookie;
 
     /**
-     * Fetches a cookie for a domain, retrying until one arrives.
+     * Makes exactly one attempt to fetch the cookie of a domain.
      * @param {string} domain - Domain extension.
-     * @param {number} [maxAttempts] - How often to retry before giving up.
-     * @returns {Promise<string|null>} - The cookie, or null when it could not be fetched.
+     * @returns {Promise<string|null>} - The cookie, or null when the attempt failed.
      */
-    static async fetch(domain, maxAttempts = Infinity) {
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-            try {
-                const fetched = await fetchCookie(domain);
-                if (fetched.cookie) {
-                    this.cookies.set(domain, fetched.cookie);
-                    Logger.info(`Fetched cookie for vinted.${domain}`);
-                    return fetched.cookie;
-                }
-            } catch (error) {
-                Logger.debug(`Error fetching cookie for vinted.${domain}: ${error.message}`);
-            }
-
-            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+    static async fetch(domain) {
+        let result;
+        try {
+            result = await this.fetchCookie(domain);
+        } catch (error) {
+            result = { success: false, error: error.message };
         }
 
+        if (result?.cookie) {
+            const firstTime = !this.cookies.has(domain);
+            const recovered = this.failures.has(domain);
+
+            this.cookies.set(domain, result.cookie);
+            this.failures.delete(domain);
+
+            // The routine refresh once a minute would drown the log, only the news is logged.
+            if (firstTime || recovered) {
+                Logger.info(`Fetched cookie for vinted.${domain}`);
+            } else {
+                Logger.debug(`Refreshed cookie for vinted.${domain}`);
+            }
+            return result.cookie;
+        }
+
+        const previous = this.failures.get(domain);
+        const delayMs = previous
+            ? Math.min(previous.delayMs * 2, MAX_RETRY_DELAY_MS)
+            : REFRESH_INTERVAL_MS;
+        this.failures.set(domain, { delayMs, retryAt: Date.now() + delayMs });
+
+        Logger.warn(`Could not fetch cookie for vinted.${domain} (next attempt in ${Math.round(delayMs / 1000)}s): ${result?.error ?? 'no cookie in the response'}`);
         return null;
     }
 
     /**
+     * Whether a domain is waiting out its delay after a failed attempt.
+     * @param {string} domain - Domain extension.
+     * @returns {boolean} - True while no new attempt should be made.
+     */
+    static isWaiting(domain) {
+        const failure = this.failures.get(domain);
+        return Boolean(failure) && Date.now() < failure.retryAt;
+    }
+
+    /**
+     * Runs one attempt for a domain, sharing it with anyone who asks meanwhile.
+     * @param {string} domain - Domain extension.
+     * @returns {Promise<string|null>} - The cookie, or null.
+     */
+    static request(domain) {
+        if (!this.pending.has(domain)) {
+            const attempt = this.fetch(domain).finally(() => this.pending.delete(domain));
+            this.pending.set(domain, attempt);
+        }
+        return this.pending.get(domain);
+    }
+
+    /**
      * Returns the cookie of a domain, fetching it on first use.
-     * Concurrent callers for the same domain share one request.
      * @param {string} [domain] - Domain extension.
-     * @returns {Promise<string|null>} - The cookie.
+     * @returns {Promise<string|null>} - The cookie; null while the marketplace refuses to hand one out.
      */
     static async get(domain = defaultDomain) {
         const known = this.cookies.get(domain);
@@ -58,19 +99,17 @@ class CookieService {
             return known;
         }
 
-        if (this.pending.has(domain)) {
-            return await this.pending.get(domain);
+        // While the marketplace refuses, callers go on without a cookie instead of each one
+        // triggering another request.
+        if (this.isWaiting(domain)) {
+            return null;
         }
 
-        // A new marketplace must not block its subscription forever, so this attempt is bounded.
-        const request = this.fetch(domain, 20).finally(() => this.pending.delete(domain));
-        this.pending.set(domain, request);
-
-        return await request;
+        return await this.request(domain);
     }
 
     /**
-     * Starts refreshing every known cookie in the background.
+     * Starts refreshing every known domain in the background.
      */
     static startAutoRefresh() {
         if (this.refreshTimer) {
@@ -78,12 +117,12 @@ class CookieService {
         }
 
         this.refreshTimer = setInterval(async () => {
-            for (const domain of this.cookies.keys()) {
-                try {
-                    await this.fetch(domain, 3);
-                } catch (error) {
-                    Logger.debug(`Error refreshing cookie for vinted.${domain}`);
+            const domains = new Set([...this.cookies.keys(), ...this.failures.keys()]);
+            for (const domain of domains) {
+                if (this.isWaiting(domain)) {
+                    continue;
                 }
+                await this.request(domain);
             }
         }, REFRESH_INTERVAL_MS);
     }

@@ -1,10 +1,6 @@
 import { InlineKeyboard } from 'grammy';
 import t from '../../t.js';
 
-// Telegram truncates a photo caption at 1024 characters and a text message at 4096.
-const CAPTION_LIMIT = 1024;
-const TEXT_LIMIT = 4096;
-
 /**
  * Escapes the characters that Telegram HTML parsing would swallow.
  * @param {any} value - Value to escape.
@@ -48,60 +44,19 @@ export function replaceDomainInUrl(url, domain) {
 }
 
 /**
- * Renders a Vinted rating as stars.
- * @param {number} rating - Rating between 0 and 1.
- * @returns {string} - Star string.
- */
-function getStars(rating) {
-    const rounded = Math.round(rating * 5);
-    return '⭐️'.repeat(Math.max(0, Math.min(5, rounded)));
-}
-
-/**
- * Formats how long ago a timestamp was, in the language of the recipient.
- * @param {number} unixSeconds - Unix timestamp in seconds.
- * @param {string} lang - Language code.
- * @returns {string|null} - Human readable distance, null when the timestamp is unusable.
- */
-function formatRelativeTime(unixSeconds, lang) {
-    if (!unixSeconds || unixSeconds <= 0) {
-        return null;
-    }
-
-    const diffSeconds = Math.round((unixSeconds * 1000 - Date.now()) / 1000);
-    const units = [
-        ['day', 86400],
-        ['hour', 3600],
-        ['minute', 60],
-        ['second', 1],
-    ];
-
-    try {
-        const formatter = new Intl.RelativeTimeFormat(lang || 'en', { numeric: 'auto' });
-        for (const [unit, seconds] of units) {
-            if (Math.abs(diffSeconds) >= seconds || unit === 'second') {
-                return formatter.format(Math.round(diffSeconds / seconds), unit);
-            }
-        }
-    } catch (error) {
-        return null;
-    }
-
-    return null;
-}
-
-/**
- * Builds the caption of an item notification.
+ * Builds the caption of an item notification from what the catalog page shows.
+ *
+ * Every part is bounded, so the caption stays far below the 1024 characters Telegram allows
+ * for a photo and never has to be cut - cutting HTML could split a tag.
  * @param {Object} params - Rendering parameters.
  * @param {import('../../entities/vinted_item.js').VintedItem} params.item - The item.
  * @param {string} params.domain - Vinted domain extension of the search.
  * @param {string} params.lang - Language of the recipient.
  * @param {string} [params.subscriptionName] - Name of the subscription that found the item.
  * @param {boolean} [params.withLinks] - Append the links, used when no buttons can be attached.
- * @param {number} [params.limit] - Maximum length of the result.
  * @returns {string} - HTML formatted caption.
  */
-export function buildItemCaption({ item, domain, lang, subscriptionName, withLinks = false, limit = CAPTION_LIMIT }) {
+export function buildItemCaption({ item, domain, lang, subscriptionName, withLinks = false }) {
     const itemUrl = replaceDomainInUrl(item.url, domain);
     const lines = [];
 
@@ -121,27 +76,16 @@ export function buildItemCaption({ item, domain, lang, subscriptionName, withLin
 
     const facts = [];
     if (item.size && item.size !== 'N/A') {
-        facts.push(`📏 ${escapeHtml(item.size)}`);
+        facts.push(`📏 ${escapeHtml(truncate(item.size, 40))}`);
     }
     if (item.brand && item.brand !== 'N/A') {
-        facts.push(`🏷 ${escapeHtml(item.brand)}`);
+        facts.push(`🏷 ${escapeHtml(truncate(item.brand, 60))}`);
     }
     if (item.status && item.status !== 'N/A') {
-        facts.push(`📦 ${escapeHtml(item.status)}`);
+        facts.push(`📦 ${escapeHtml(truncate(item.status, 40))}`);
     }
     if (facts.length) {
         lines.push(facts.join('  ·  '));
-    }
-
-    const rating = item.user ? item.user.feedback_reputation : 0;
-    if (rating > 0) {
-        const roundedRating = Math.round(rating * 50) / 10;
-        lines.push(`${getStars(rating)} ${roundedRating} (${item.user.feedback_count})`);
-    }
-
-    const updated = formatRelativeTime(item.unixUpdatedAt, lang);
-    if (updated) {
-        lines.push(`🕒 ${escapeHtml(updated)}`);
     }
 
     if (subscriptionName) {
@@ -152,21 +96,7 @@ export function buildItemCaption({ item, domain, lang, subscriptionName, withLin
         lines.push(`\n<a href="${escapeHtml(itemUrl)}">${escapeHtml(t(lang, 'open-on-vinted'))}</a>`);
     }
 
-    const head = lines.join('\n');
-
-    // Whatever is left of the caption budget goes to the description.
-    const hasDescription = item.description && item.description !== 'N/A';
-    if (!hasDescription) {
-        return truncate(head, limit);
-    }
-
-    const remaining = limit - head.length - 6;
-    if (remaining < 40) {
-        return truncate(head, limit);
-    }
-
-    const description = escapeHtml(truncate(item.description.replace(/\s+/g, ' ').trim(), remaining));
-    return `${head}\n\n📝 ${description}`;
+    return lines.join('\n');
 }
 
 /**
@@ -207,4 +137,4 @@ export function buildItemMediaGroup(item, caption, maxPhotos) {
     }));
 }
 
-export { CAPTION_LIMIT, TEXT_LIMIT, truncate };
+export { truncate };
